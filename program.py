@@ -437,84 +437,36 @@ def display_tuning_results(results_path):
 def tune_model(config):
     """Execute hyperparameter tuning with given configuration."""
     try:
-        # Extract trained model directory if applicable
-        model_path = config['model']
-        model_dir = None
-        if os.path.exists(model_path) and 'runs/detect' in model_path:
-            # This is a custom trained model
-            parts = model_path.split(os.sep)
-            try:
-                # Find the directory name in runs/detect/DIR/weights/model.pt
-                detect_idx = parts.index('detect')
-                if detect_idx + 1 < len(parts):
-                    model_dir = parts[detect_idx + 1]
-                    console.print(f"[blue]Original training directory: {model_dir}[/blue]")
-            except ValueError:
-                pass
-                
-        # Check for original hyperparameters if available
-        orig_hp = {}
-        if model_dir:
-            args_file = os.path.join('runs/detect', model_dir, 'args.yaml')
-            if os.path.exists(args_file):
-                try:
-                    with open(args_file, 'r') as f:
-                        args = yaml.safe_load(f)
-                        console.print("[blue]Loaded original training parameters as reference[/blue]")
-                        # Extract relevant hyperparameters
-                        for param in ['lr0', 'lrf', 'momentum', 'weight_decay', 'warmup_epochs', 
-                                    'warmup_momentum', 'box', 'cls', 'dfl']:
-                            if param in args:
-                                orig_hp[param] = args[param]
-                except Exception as e:
-                    console.print(f"[yellow]Error reading original hyperparameters: {str(e)}[/yellow]")
-
         # Load the model
-        console.print(f"[blue]Loading trained model from: {model_path}[/blue]")
-        model = YOLO(model_path)
+        console.print(f"[blue]Loading trained model from: {config['model']}[/blue]")
+        model = YOLO(config['model'])
         
-        # Prepare tuning kwargs
+        # Prepare tuning kwargs - include critical parameters
         tune_kwargs = {
             'data': config['data_yaml'],
-            'epochs': config['epochs'],
-            'iterations': config['iterations'],
-            'optimizer': config['optimizer'],
-            'plots': config['plot_results'],
-            'save': config.get('save_results', True),
-            'val': config.get('val_during_tune', False),
-            'use_ray': config['use_ray'],
-            'name': config['model_name'] if config['model_name'] else None
+            'use_ray': config.get('use_ray', False),
+            'iterations': config.get('iterations', 300),  # Always include iterations with a default
+            'epochs': config.get('epochs', 30)  # Always include epochs with a default
         }
         
-        # Add custom search space if provided
-        if config['custom_space']:
-            # If we have original hyperparameters, print them for reference
-            if orig_hp:
-                console.print("\n[bold blue]Original Hyperparameters:[/bold blue]")
-                for param, value in orig_hp.items():
-                    if param in config['custom_space']:
-                        min_val, max_val = config['custom_space'][param]
-                        console.print(f"[blue]{param}: {value} (Search range: {min_val} to {max_val})[/blue]")
-                    else:
-                        console.print(f"[blue]{param}: {value} (Not being tuned)[/blue]")
-            
-            tune_kwargs['space'] = config['custom_space']
-        
-        # Add resume path if provided
+        # Add resume path - this is the key parameter for resuming
         if 'resume' in config and config['resume']:
             tune_kwargs['resume'] = config['resume']
             console.print(f"[bold blue]Resuming tuning from {config['resume']}[/bold blue]")
+            
+        if 'optimizer' in config:
+            tune_kwargs['optimizer'] = config['optimizer']
         
         # Start hyperparameter tuning
         console.print("\n[bold green]Starting hyperparameter tuning on trained model...[/bold green]")
         console.print("[yellow]This may take a long time depending on your configuration.[/yellow]")
-        console.print(f"[blue]Running {config['iterations']} iterations with {config['epochs']} epochs each.[/blue]")
+        console.print(f"[blue]Running with {tune_kwargs['iterations']} iterations and {tune_kwargs['epochs']} epochs per iteration[/blue]")
         
         results = model.tune(**tune_kwargs)
         
         # Print information about best results
         console.print("\n[bold green]Hyperparameter tuning complete![/bold green]")
-        results_path = os.path.join('runs/detect', config['model_name'] if config['model_name'] else 'tune')
+        results_path = config['resume'] if 'resume' in config else os.path.join('runs/detect', 'tune')
         console.print(f"[green]Results saved to {results_path}[/green]")
         
         # Display detailed results
@@ -527,6 +479,17 @@ def tune_model(config):
             console.print("\n[red]CUDA out of memory error occurred. Try:[/red]")
             console.print("1. Reducing epochs (currently: {})".format(config.get('epochs')))
             console.print("2. Using a smaller model type")
+        elif "index" in str(e) and "out of bounds" in str(e):
+            console.print("\n[red]Index error during tuning. This might be caused by:[/red]")
+            console.print("1. A change in the hyperparameter search space between runs")
+            console.print("2. Corruption in the tuning results file")
+            console.print("\n[yellow]Try one of the following:[/yellow]")
+            console.print("1. Back up and rename the tuning directory, then start a new tuning run")
+            console.print("2. Use the tune_reset.py script to reset the tuning session (if available)")
+            console.print("3. Start a fresh tuning session with a different name")
+        else:
+            console.print(f"\n[red]Error: {str(e)}[/red]")
+            console.print("[yellow]Check that all required parameters are provided.[/yellow]")
         raise
 
 def get_tuning_resume_options():
@@ -543,6 +506,133 @@ def get_tuning_resume_options():
             tune_dirs.append(d)
     
     return tune_dirs
+
+def continue_hyperparameter_tuning_menu():
+    """Interactive menu for continuing a stopped hyperparameter tuning process."""
+    print("\n=== Continue Hyperparameter Tuning ===")
+    
+    # Get available tuning directories
+    tune_dirs = get_tuning_resume_options()
+    if not tune_dirs:
+        console.print("[red]No existing hyperparameter tuning sessions found in runs/detect![/red]")
+        return None
+    
+    # Display available tuning directories
+    print("\nAvailable tuning sessions:")
+    for i, dir_ in enumerate(tune_dirs, 1):
+        # Get some stats about the tuning session if available
+        tune_config_path = os.path.join('runs/detect', dir_, 'tune_config.yaml')
+        tune_results_path = os.path.join('runs/detect', dir_, 'tune_results.csv')
+        
+        iterations_completed = 0
+        total_iterations = 0
+        
+        if os.path.exists(tune_results_path):
+            try:
+                with open(tune_results_path, 'r') as f:
+                    # Count number of lines (minus header)
+                    iterations_completed = sum(1 for _ in f) - 1
+            except Exception:
+                pass
+                
+        if os.path.exists(tune_config_path):
+            try:
+                with open(tune_config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    total_iterations = config.get('iterations', 0)
+            except Exception:
+                pass
+        
+        status = f"Progress: {iterations_completed}/{total_iterations} iterations" if total_iterations else f"Completed: {iterations_completed} iterations"
+        print(f"{i}. {dir_} - {status}")
+    
+    # Let user select directory
+    dir_choice = get_numeric_input("Select directory number to resume: ", min_val=1, max_val=len(tune_dirs))
+    selected_dir = tune_dirs[dir_choice - 1]
+    resume_path = os.path.join('runs/detect', selected_dir)
+    
+    # Read original configuration
+    original_config = {}
+    tune_config_path = os.path.join(resume_path, 'tune_config.yaml')
+    if os.path.exists(tune_config_path):
+        try:
+            with open(tune_config_path, 'r') as f:
+                original_config = yaml.safe_load(f)
+                console.print(f"[green]Successfully loaded original tuning configuration.[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Error reading tune_config.yaml: {str(e)}[/yellow]")
+    
+    # Get model path - using best.pt from the tuning directory if available
+    model_path = os.path.join(resume_path, 'weights', 'best.pt')
+    if not os.path.exists(model_path):
+        console.print(f"[yellow]Best model not found at {model_path}, looking for original model...[/yellow]")
+        model_path = original_config.get('model', None)
+        
+        if not model_path:
+            # Ask user to select the base model manually
+            directories = get_available_directories()
+            if not directories:
+                console.print("[red]No existing training directories found![/red]")
+                return None
+
+            print("\nSelect base model directory:")
+            for i, dir_ in enumerate(directories, 1):
+                print(f"{i}. {dir_}")
+
+            dir_choice = get_numeric_input("Select directory number: ", min_val=1, max_val=len(directories))
+            selected_model_dir = directories[dir_choice - 1]
+
+            checkpoints = get_checkpoints(selected_model_dir)
+            if not checkpoints:
+                console.print("[red]No checkpoint files found in selected directory![/red]")
+                return None
+
+            print("\nSelect checkpoint:")
+            for i, checkpoint in enumerate(checkpoints, 1):
+                print(f"{i}. {checkpoint}")
+
+            checkpoint_choice = get_numeric_input("Select checkpoint number: ", min_val=1, max_val=len(checkpoints))
+            selected_checkpoint = checkpoints[checkpoint_choice - 1]
+            model_path = os.path.join('runs/detect', selected_model_dir, 'weights', selected_checkpoint)
+    
+    # Get dataset path
+    data_yaml = original_config.get('data', None)
+    
+    if not data_yaml:
+        data_yaml = input("Enter path to dataset.yaml [dataset.yaml]: ") or "dataset.yaml"
+    else:
+        data_yaml = input(f"Enter path to dataset.yaml [{data_yaml}]: ") or data_yaml
+    
+    # Get iterations and epochs from original config with defaults
+    original_iterations = original_config.get('iterations', 300)
+    original_epochs = original_config.get('epochs', 30)
+    
+    # Ask if user wants to continue with exact same configuration (let Ultralytics handle the resume logic)
+    use_original_config = input("\nContinue with original configuration? (y/n) [y]: ").lower() != 'n'
+    
+    # Create configuration for resuming - keep it simple and let Ultralytics handle the details
+    config = {
+        'model': model_path,
+        'data_yaml': data_yaml,
+        'resume': resume_path,  # This is the key parameter for resuming
+        'use_ray': original_config.get('use_ray', False),
+        'optimizer': original_config.get('optimizer', 'Adam')
+    }
+    
+    if use_original_config:
+        # Always include iterations and epochs from original config
+        config['iterations'] = original_iterations
+        config['epochs'] = original_epochs
+        console.print(f"[green]Using original configuration: {original_iterations} iterations with {original_epochs} epochs each[/green]")
+    else:
+        # Get additional tuning parameters if user wants to change them
+        additional_iterations = get_numeric_input("Enter additional iterations to run", 100, min_val=1)
+        epochs_per_iter = get_numeric_input("Enter epochs per iteration", 30, min_val=1)
+        
+        config['iterations'] = additional_iterations
+        config['epochs'] = epochs_per_iter
+    
+    return config
 
 def new_training_menu():
     """Interactive menu for new training configuration."""
@@ -878,8 +968,9 @@ def main():
         print("2. Continue Training")
         print("3. Fine-tune Model")
         print("4. Hyperparameter Tuning")
-        print("5. Template Hyperparameter Tuning")
-        print("6. Exit")
+        print("5. Continue Hyperparameter Tuning")
+        print("6. Template Hyperparameter Tuning")
+        print("7. Exit")
 
         choice = input("\nInput Choice: ")
 
@@ -945,8 +1036,22 @@ def main():
                     
                     results = tune_model(config)
                     console.print("[green]Hyperparameter tuning complete![/green]")
-                    
+        
         elif choice == "5":
+            config = continue_hyperparameter_tuning_menu()
+            if config:
+                print("\nContinuing Hyperparameter Tuning:")
+                print(f"Resume from: {config['resume']}")
+                print(f"Model: {config['model']}")
+                print(f"Dataset: {config['data_yaml']}")
+                print(f"Additional iterations: {config['iterations']}")
+                print(f"Epochs per iteration: {config['epochs']}")
+                
+                if input("\nProceed with continuing hyperparameter tuning? (y/n): ").lower() == 'y':
+                    results = tune_model(config)
+                    console.print("[green]Continued hyperparameter tuning complete![/green]")
+                    
+        elif choice == "6":
             config = template_hyperparameter_tuning()
             if config:
                 print("\nTemplate Hyperparameter Tuning Configuration Summary:")
@@ -975,7 +1080,7 @@ def main():
                     results = tune_model(config)
                     console.print("[green]Template hyperparameter tuning complete![/green]")
 
-        elif choice == "6":
+        elif choice == "7":
             print("Exiting...")
             break
 
