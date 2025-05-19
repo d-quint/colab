@@ -7,6 +7,9 @@ matplotlib>=3.4.0
 numpy>=1.20.0
 # Ray is optional for hyperparameter tuning
 ray>=2.0.0
+# For downloading files from Google Drive
+gdown>=4.6.0
 # Additional dependencies 
 # For Google Colab compatibility
 ipython>=7.0.0
+opencv-python>=4.5.0
